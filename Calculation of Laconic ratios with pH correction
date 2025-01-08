@@ -1,348 +1,489 @@
-# load dependencies and libraries
-library(tidyverse)
-library(readr)
-library(rowr)
-library(MESS)
-library(broom)
-library (varhandle)
-library(plotrix)
-library(aomisc)
-library(CausalImpact)
+# =================================================================
+# Fluorescence Analysis Script
+# =================================================================
+# This script analyzes fluorescence microscopy data from dual-channel imaging
+# It processes both Laconic sensor (CFP/YFP) and pHrodo measurements
+# Performs background subtraction, photobleaching correction, and pH corrections
+# =================================================================
 
-setwd("~/") #sets working directory
+# INPUT FILE REQUIREMENTS
+# =================================================================
+# 1. File Naming Convention:
+#    - Laconic sensor files should be named: [SampleName]_Laconic.csv
+#    - pHrodo files should be named: [SampleName]_pHrodo.csv
+#    - Each Laconic file must have a matching pHrodo file
+#    Example: "Sample1_Laconic.csv" and "Sample1_pHrodo.csv"
+#
+# 2. Laconic File Format:
+#    - CSV file with the following columns:
+#    - Column 1: treatments (any label)
+#    - Column 2: Time (any label)
+#    - Columns 3-11: CFP channel measurements (#1-9 CFP)
+#    - Columns 12-20: YFP channel measurements (#1-9 YFP)
+#    - Last column in each channel should be background measurement
+#
+# 3. pHrodo File Format:
+#    - CSV file with the following columns:
+#    - Column 1: treatments (any label)
+#    - Column 2: Time (any label)
+#    - Columns 3-11: TRITC channel measurements (#1-9 TRITC)
+#    - Last column should be background measurement
+#
+# 4. Data Requirements:
+#    - Both files must have the same number of time points
+#    - Time points must be aligned between Laconic and pHrodo files
+#    - Background measurements must be included as the last column
+#    - No missing values allowed in measurement columns
+# =================================================================
 
-input_path <- "xyz" #input files are stored in this folder
-output_path <- "abc" #results of the analyses are placed in this folder
 
+# Load required packages
+library(tidyverse)  # For data manipulation and visualization
+library(readr)      # For reading CSV files
+library(rowr)       # For row operations
+library(MESS)       # For AUC calculations
+library(broom)      # For converting statistical objects to tidy data frames
+library(varhandle)  # For variable handling
+library(plotrix)    # For error calculations
+library(aomisc)     # For curve fitting
+library(CausalImpact)  # For time series analysis
+
+# Set working directory and file paths
+setwd("~/")  # Change this to your working directory
+input_path <- "xyz"   # Directory containing input files
+output_path <- "abc"  # Directory for saving results
+
+# Get list of input files
 list1 <- as.data.frame(list.files(path=input_path))
-colnames(list1)<-c("files")
+colnames(list1) <- c("files")
 
-#the following section identifies and separate pHrodo and Laconic time series files. pHrodo files should have "pHrodo" appended to filename. Example file names: "WT1_Laconic.csv" and "WT1_pHrodo.csv"
-list2<- as.data.frame(list1[c(which(grepl("pHrodo",list1$files)==T)),])
-colnames(list2)<-c("files")
+# Separate pHrodo and Laconic files
+list2 <- as.data.frame(list1[c(which(grepl("pHrodo",list1$files)==T)),])
+colnames(list2) <- c("files")
 list1 <- as.data.frame(list1[-c(which(grepl("pHrodo",list1$files)==T)),])
-colnames(list1)<-c("files")
+colnames(list1) <- c("files")
 
-for (list_files in 1:(nrow(list1))){
+# Process each Laconic file
+for (list_files in 1:(nrow(list1))) {
+  # Read current file
   file_uploaded <- as.character(list1[c(list_files),])
   ratio_file <- read_csv(paste0(input_path,file_uploaded))
+  
+  # Standardize column names
   colnames(ratio_file) <- c("...1","Time [m:s]",colnames(ratio_file[,3:ncol(ratio_file)]))
+  
+  # Remove NA rows if present
   rem1 <- which(is.na(ratio_file$`Time [m:s]`)==T)
   if (is_empty(rem1)==F){
     ratio_file <- ratio_file[-c(rem1),]
   }
-  col_names <- as.data.frame(colnames(ratio_file))
-  rem_cols <- which(grepl("CFP",col_names$`colnames(ratio_file)`)==T) #"CFP" and "YFP" are appended to column names for the two channels
-  ratio_file_YFP <- as.data.frame(ratio_file[,-c(rem_cols)])
   
-  # the following section subtracts the background signal for YFP equivalent channel
+  # Separate CFP and YFP channels
+  col_names <- as.data.frame(colnames(ratio_file))
+  rem_cols <- which(grepl("CFP",col_names$`colnames(ratio_file)`)==T)
+  ratio_file_YFP <- as.data.frame(ratio_file[,-c(rem_cols)])
+  ratio_file_CFP <- as.data.frame(ratio_file[,c(1,2,rem_cols)])
+  
+  # Background subtraction for YFP channel
   for (j in 3:(ncol(ratio_file_YFP)-1)){
     col1 <- as.matrix(ratio_file_YFP[,c(j)])
     col_back <- as.matrix(ratio_file_YFP[,c(ncol(ratio_file_YFP))])
-    ratio_file_YFP[,c(j)]<-col1-col_back
+    ratio_file_YFP[,c(j)] <- col1-col_back
   }
-  ratio_file_YFP[,c(ncol(ratio_file_YFP))]<-NULL
+  ratio_file_YFP[,c(ncol(ratio_file_YFP))] <- NULL
   
-  ratio_file_CFP <- as.data.frame(ratio_file[,c(1,2,rem_cols)])
-  
-  # the following section subtracts the background signal for CFP equivalent channel
+  # Background subtraction for CFP channel
   for (j in 3:(ncol(ratio_file_CFP)-1)){
     col1 <- as.matrix(ratio_file_CFP[,c(j)])
     col_back <- as.matrix(ratio_file_CFP[,c(ncol(ratio_file_CFP))])
-    ratio_file_CFP[,c(j)]<-col1-col_back
+    ratio_file_CFP[,c(j)] <- col1-col_back
   }
-  ratio_file_CFP[,c(ncol(ratio_file_CFP))]<-NULL
+  ratio_file_CFP[,c(ncol(ratio_file_CFP))] <- NULL
   
+  # Get treatment time point
   time_add <- as.numeric(ratio_file[c(which(ratio_file$...1==1)),2])
   
+  # Get baseline period data
   ratio_file_CFP_back <- filter(ratio_file_CFP,ratio_file_CFP$`Time [m:s]`<time_add)
   ratio_file_YFP_back <- filter(ratio_file_YFP,ratio_file_YFP$`Time [m:s]`<time_add)
   
-  # the following section corrects for fluorescence bleach
+  # Photobleaching correction
+  # Uses exponential decay fitting to correct for fluorescence bleaching
   for (i in 3:ncol(ratio_file_CFP)){
+    # Process CFP channel
     full_data <- ratio_file_CFP_back[,c(2,i)]
+    colnames(full_data) <- c("X","Y")
     
-    colnames(full_data)<-c("X","Y")
-    a<- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    # Try exponential decay fit
+    a <- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    
     if (grepl("Error",a[1])==T){
-      ratio_file_CFP[,c(i)]<-ratio_file_CFP[,c(i)]/mean(full_data$Y)
-    } else{
+      # If fitting fails, normalize to mean
+      ratio_file_CFP[,c(i)] <- ratio_file_CFP[,c(i)]/mean(full_data$Y)
+    } else {
+      # Apply exponential decay correction
       nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
       nlsfit_vals <- as.data.frame(tidy(nlsfit))
       full_data2 <- as.data.frame(ratio_file_CFP[,c(2,i)])
-      colnames(full_data2)<-c("X","Y")
+      colnames(full_data2) <- c("X","Y")
       Y0 <- as.numeric(nlsfit_vals[1,2])
       k <- as.numeric(nlsfit_vals[2,2])
-      full_data2 <- full_data2 %>% mutate (Y2=(Y0)*exp((-k)*full_data2$X))
-      full_data2 <- full_data2 %>% mutate (Y3=full_data2$Y/full_data2$Y2)
-      full_data2 <- full_data2 %>% mutate (Y4=full_data2$Y3*full_data2$Y)
-      # write.csv(full_data2,"Desktop/full_data2.csv")
+      
+      # Calculate corrected values
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2) %>%
+        mutate(Y4=full_data2$Y3*full_data2$Y)
+      
+      # Apply correction based on trend
       if (full_data2[1,3]>full_data2[nrow(full_data2),3]){
-        ratio_file_CFP[,c(i)]<-full_data2$Y4
-      } else {ratio_file_CFP[,c(i)]<-full_data2$Y}
+        ratio_file_CFP[,c(i)] <- full_data2$Y4
+      } else {
+        ratio_file_CFP[,c(i)] <- full_data2$Y
+      }
     }
     
+    # Repeat process for YFP channel
     full_data <- ratio_file_YFP_back[,c(2,i)]
+    colnames(full_data) <- c("X","Y")
     
-    colnames(full_data)<-c("X","Y")
     if (grepl("Error",a[1])==T){
-      ratio_file_YFP[,c(i)]<-ratio_file_YFP[,c(i)]/mean(full_data$Y)
-    } else{
+      ratio_file_YFP[,c(i)] <- ratio_file_YFP[,c(i)]/mean(full_data$Y)
+    } else {
       full_data2 <- as.data.frame(ratio_file_YFP[,c(2,i)])
-      colnames(full_data2)<-c("X","Y")
-      full_data2 <- full_data2 %>% mutate (Y2=(Y0)*exp((-k)*full_data2$X))
-      full_data2 <- full_data2 %>% mutate (Y3=full_data2$Y/full_data2$Y2)
-      full_data2 <- full_data2 %>% mutate (Y4=full_data2$Y3*full_data2$Y)
-      # write.csv(full_data2,"Desktop/full_data2.csv")
-      ratio_file_YFP[,c(i)]<-full_data2$Y4
+      colnames(full_data2) <- c("X","Y")
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2) %>%
+        mutate(Y4=full_data2$Y3*full_data2$Y)
+      ratio_file_YFP[,c(i)] <- full_data2$Y4
     }
   }
   
+  # Calculate CFP/YFP ratios
   final_ratios <- ratio_file_YFP
-  
-  # the following section calculates the CFP/YFP ratio 
   for (k in 3:ncol(final_ratios)){
-    YFP<-ratio_file_YFP[,c(k)]
-    CFP<-ratio_file_CFP[,c(k)] 
-    final_ratios[,c(k)]<-CFP/YFP
-    
+    YFP <- ratio_file_YFP[,c(k)]
+    CFP <- ratio_file_CFP[,c(k)] 
+    final_ratios[,c(k)] <- CFP/YFP
   }
   final_ratios_original <- final_ratios
   
-  # the following section normalizes the traces to the mean of the baseline prior to treatment
+  # Normalize to baseline
   for (i in 3:ncol(final_ratios)){
     col1 <- as.data.frame(final_ratios[,c(i)])
     col2 <- col1[c(1:which(ratio_file$...1==1)),]
     norm_val <- mean(col2)
-    final_ratios[,c(i)]<-final_ratios[,c(i)]/norm_val
+    final_ratios[,c(i)] <- final_ratios[,c(i)]/norm_val
   }
   
-  # the following section saves the results of the analyses to the output folder
+  # Save intermediate results
   write.csv(final_ratios,paste0(output_path,"/normalized_Laconic_ratios_",file_uploaded))
   write.csv(final_ratios_original,paste0(output_path,"/original_Laconic_ratios_",file_uploaded))
   write.csv(ratio_file_CFP,paste0(output_path,"/CFP_",file_uploaded))
   write.csv(ratio_file_YFP,paste0(output_path,"/YFP_",file_uploaded))
   
-  # the following section normalizes the traces to exponential fit of pre-mixing decrease in Laconic ratios
+  # Normalization to the pre-mixing baselines using exponential fit
   final_ratios_baseline <- final_ratios
   final_ratios_corrected <- final_ratios
   k_table <- as.data.frame(matrix(0,nrow=(ncol(final_ratios)-2)),ncol=1)
   
   for (i in 3:ncol(final_ratios)){
+    # Process each trace
     full_data <- final_ratios[,c(1,2,i)]
     full_data <- filter(full_data,full_data$`Time [m:s]`<time_add)
-    full_data[,c(1)]<-NULL
+    full_data[,c(1)] <- NULL
+    colnames(full_data) <- c("X","Y")
     
-    colnames(full_data)<-c("X","Y")
-    
-    a<- try(nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    # Try different fitting methods
+    a <- try(nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
     if (grepl("Error",a[1])==T){
-      b<- try(nls(Y ~ SSasymp(X, yf, y0, log_alpha), data = full_data),silent = TRUE)
+      b <- try(nls(Y ~ SSasymp(X, yf, y0, log_alpha), data = full_data),silent = TRUE)
       if (grepl("Error",b[1])==F){
+        # Asymptotic regression fit
         nlsfit <- nls(Y ~ SSasymp(X, yf, y0, log_alpha), data = full_data)
         nlsfit_vals <- as.data.frame(tidy(nlsfit))
         full_data2 <- as.data.frame(final_ratios[,c(2,i)])
-        colnames(full_data2)<-c("X","Y")
+        colnames(full_data2) <- c("X","Y")
+        
+        # Extract parameters
         Y0 <- as.numeric(nlsfit_vals[2,2])
         k <- exp(as.numeric(nlsfit_vals[3,2]))
         Yf <- as.numeric(nlsfit_vals[1,2])
-        full_data2 <- full_data2 %>% mutate (Y2=((Y0-Yf)*exp((-1*k)*full_data2$X))+Yf)
-        full_data2 <- full_data2 %>% mutate (Y3=(full_data2$Y/full_data2$Y2)*as.numeric(full_data2[1,2]))
-        final_ratios_baseline[,c(i)]<-full_data2$Y2
-        final_ratios_corrected[,c(i)]<-full_data2$Y3
-      } else{
-        final_ratios_baseline[,c(i)]<-NA
-        final_ratios_corrected[,c(i)]<-final_ratios[,c(i)]
+        
+        # Calculate corrections
+        full_data2 <- full_data2 %>% 
+          mutate(Y2=((Y0-Yf)*exp((-1*k)*full_data2$X))+Yf) %>%
+          mutate(Y3=(full_data2$Y/full_data2$Y2)*as.numeric(full_data2[1,2]))
+        
+        final_ratios_baseline[,c(i)] <- full_data2$Y2
+        final_ratios_corrected[,c(i)] <- full_data2$Y3
+      } else {
+        # If both fits fail
+        final_ratios_baseline[,c(i)] <- NA
+        final_ratios_corrected[,c(i)] <- final_ratios[,c(i)]
       }
     } else {
+      # Exponential decay fit
       nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
       nlsfit_vals <- as.data.frame(tidy(nlsfit))
       full_data2 <- as.data.frame(final_ratios[,c(2,i)])
-      colnames(full_data2)<-c("X","Y")
+      colnames(full_data2) <- c("X","Y")
+      
+      # Extract parameters
       Y0 <- as.numeric(nlsfit_vals[1,2])
       k <- as.numeric(nlsfit_vals[2,2])
-      full_data2 <- full_data2 %>% mutate (Y2=(Y0)*exp((-k)*full_data2$X))
-      full_data2 <- full_data2 %>% mutate (Y3=(full_data2$Y/full_data2$Y2)*as.numeric(full_data2[1,2]))
-      final_ratios_baseline[,c(i)]<-full_data2$Y2
-      final_ratios_corrected[,c(i)]<-full_data2$Y3
-      k_table[(i-2),]<-k
+      
+      # Calculate corrections
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=(full_data2$Y/full_data2$Y2)*as.numeric(full_data2[1,2]))
+      
+      final_ratios_baseline[,c(i)] <- full_data2$Y2
+      final_ratios_corrected[,c(i)] <- full_data2$Y3
+      k_table[(i-2),] <- k
     }
   }
+  
+  # Save baseline correction results
   write.csv(final_ratios_baseline,paste0(output_path,"/normalized_Laconic_ratios_baseline_",file_uploaded))
   write.csv(final_ratios_corrected,paste0(output_path,"/normalized_Laconic_ratios_baseline_corrected_",file_uploaded))
-  write.csv(k_table,paste0(output_path,"/k_table_",file_uploaded)) # file for list of k-values from exponential fits
+  write.csv(k_table,paste0(output_path,"/k_table_",file_uploaded))
   
-  
-  #Following section calculates mean +/- SEM values and stores it in the output folder 
+  # Calculate mean and SEM
   final_ratios <- final_ratios_corrected
-  
   final_ratiosb <- as.data.frame(final_ratios[,c(1,2)])
   final_ratiosc <- as.data.frame(final_ratios[,-c(1,2)])
-  final_ratiosb[,c(3)]<-rowMeans(final_ratiosc)
+  final_ratiosb[,c(3)] <- rowMeans(final_ratiosc)
+  
   for (m in 1:nrow(final_ratiosc)){
-    final_ratiosb[c(m),c(4)]<-std.error(t(final_ratiosc[c(m),]))
+    final_ratiosb[c(m),c(4)] <- std.error(t(final_ratiosc[c(m),]))
   }
-  colnames(final_ratiosb)<-c("","Time [m:s]","mean","SEM")
+  colnames(final_ratiosb) <- c("","Time [m:s]","mean","SEM")
+  
   write.csv(final_ratiosb,paste0(output_path,"/normalized_Laconic_ratios_mean_SEM_",file_uploaded))
   
-  #the following section calculates the integrated changes in Laconic ratios
+  # Calculate integrated changes (Area Under Curve)
   area_list <- as.data.frame(matrix(0,nrow=0,ncol=1))
+  
   for (k in 3:ncol(final_ratios)){
+    # Get treatment period data
     col1 <- as.data.frame(final_ratios[c(which(final_ratios$...1==1):(which(final_ratios$...1==2)-1)),c(2,k)])
-    colnames(col1)<-c("time","ratio")
+    colnames(col1) <- c("time","ratio")
+    
+    # Get baseline period data
     precol1 <- as.data.frame(final_ratios[c(1:(which(final_ratios$...1==1)-1)),c(2,k)])
-    colnames(precol1)<-c("time","ratio")
+    colnames(precol1) <- c("time","ratio")
     precol2 <- as.data.frame(rbind(precol1,col1))
+    
+    # Set up periods for causal impact analysis
     pre.period <- c(1,nrow(precol1))
     post.period <- c((nrow(precol1)+1),nrow(precol2))
+    
+    # Prepare data for causal impact analysis
     precol2 <- as.data.frame(precol2[,order(ncol(precol2):1)])
     impact <- CausalImpact(precol2, pre.period, post.period)
     impact_vals <- as.data.frame(impact$series)
-    impact_vals<- as.data.frame(impact_vals[-c(1:nrow(precol1)),])
+    impact_vals <- as.data.frame(impact_vals[-c(1:nrow(precol1)),])
     
-    col1 <- col1 %>% mutate (base=impact_vals$point.pred) 
+    # Calculate area under curve
+    col1 <- col1 %>% mutate(base=impact_vals$point.pred)
     time1 <- as.numeric(min(col1$time))
     time2 <- as.numeric(max(col1$time))
-    area1 <- auc(col1$time,col1$ratio,from = time1,to=time2)
-    area2 <- auc(col1$time,col1$base,from = time1,to=time2)
+    area1 <- auc(col1$time, col1$ratio, from=time1, to=time2)
+    area2 <- auc(col1$time, col1$base, from=time1, to=time2)
     area <- as.data.frame((area1-area2)/nrow(col1))
-    colnames(area)<-c("area")
-    colnames(area_list)<-colnames(area)
-    area_list <- as.data.frame(rbind(area_list,area))
+    
+    # Store results
+    colnames(area) <- c("area")
+    colnames(area_list) <- colnames(area)
+    area_list <- as.data.frame(rbind(area_list, area))
   }
- 
-  write.csv(area_list,paste0(output_path,"/AUC_per_time_",file_uploaded))
   
-  #the following section processes the pHrodo files, including background correction and bleach correction
+  write.csv(area_list, paste0(output_path, "/AUC_per_time_", file_uploaded))
+  
+  # Process pHrodo files
+  # =================================================================
   downloaded_file <- as.character(list2[c(list_files),])
-  pHRed <- read_csv(paste0(input_path,downloaded_file))
-  colnames(pHRed) <- c("...1","Time [m:s]",colnames(pHRed[,3:ncol(pHRed)]))
+  pHRed <- read_csv(paste0(input_path, downloaded_file))
+  
+  # Standardize column names
+  colnames(pHRed) <- c("...1", "Time [m:s]", colnames(pHRed[,3:ncol(pHRed)]))
+  
+  # Remove NA rows if present
   rem2 <- which(is.na(pHRed$`Time [m:s]`)==T)
   if (is_empty(rem2)==F){
     pHRed <- pHRed[-c(rem2),]
   }
+  
+  # Background subtraction for pHrodo data
   for (j in 3:(ncol(pHRed)-1)){
     col1 <- as.matrix(pHRed[,c(j)])
     col1 <- as.numeric(col1)
     col_back <- as.matrix(pHRed[,c(ncol(pHRed))])
-    pHRed[,c(j)]<-col1-col_back
+    pHRed[,c(j)] <- col1-col_back
   }
-  pHRed[,c(ncol(pHRed))]<-NULL
+  pHRed[,c(ncol(pHRed))] <- NULL
   
-  pHRed_back <- filter(pHRed,pHRed$`Time [m:s]`<time_add)
+  # Get baseline period data
+  pHRed_back <- filter(pHRed, pHRed$`Time [m:s]` < time_add)
   
+  # Photobleaching correction for pHrodo
   for (i in 3:ncol(pHRed)){
     full_data <- pHRed_back[,c(2,i)]
+    colnames(full_data) <- c("X","Y")
     
-    colnames(full_data)<-c("X","Y")
-    a<- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    # Try exponential decay fit
+    a <- try(nls(Y ~ NLS.expoDecay(X, a, k), data = full_data), silent = TRUE)
+    
     if (grepl("Error",a[1])==T){
-      pHRed[,c(i)]<-pHRed[,c(i)]/mean(full_data$Y)
-    } else{
-      nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
+      # If fitting fails, normalize to mean
+      pHRed[,c(i)] <- pHRed[,c(i)]/mean(full_data$Y)
+    } else {
+      # Apply exponential decay correction
+      nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k), data = full_data)
       nlsfit_vals <- as.data.frame(tidy(nlsfit))
       full_data2 <- as.data.frame(pHRed[,c(2,i)])
-      colnames(full_data2)<-c("X","Y")
+      colnames(full_data2) <- c("X","Y")
+      
+      # Extract parameters
       Y0 <- as.numeric(nlsfit_vals[1,2])
       k <- as.numeric(nlsfit_vals[2,2])
-      full_data2 <- full_data2 %>% mutate (Y2=(Y0)*exp((-k)*full_data2$X))
-      full_data2 <- full_data2 %>% mutate (Y3=full_data2$Y/full_data2$Y2)
-      full_data2 <- full_data2 %>% mutate (Y4=full_data2$Y3*full_data2$Y)
+      
+      # Calculate corrections
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2) %>%
+        mutate(Y4=full_data2$Y3*full_data2$Y)
+      
+      # Apply correction based on trend
       if (full_data2[1,3]>full_data2[nrow(full_data2),3]){
-        pHRed[,c(i)]<-full_data2$Y4
-      } else {pHRed[,c(i)]<-full_data2$Y}
+        pHRed[,c(i)] <- full_data2$Y4
+      } else {
+        pHRed[,c(i)] <- full_data2$Y
+      }
     }
   }
   
+  # Store original and normalized data
   pHRed_original <- pHRed
+  
+  # Normalize to baseline
   for (i in 3:ncol(pHRed)){
     col1 <- as.data.frame(pHRed[,c(i)])
     col2 <- col1[c(1:(which(pHRed$...1==1)-1)),]
     norm_val <- mean(col2)
-    pHRed[,c(i)]<-pHRed[,c(i)]/norm_val
+    pHRed[,c(i)] <- pHRed[,c(i)]/norm_val
   }
   
+  # Calculate mean and SEM for normalized data
   pHRed_1b <- as.data.frame(pHRed[,c(1,2)])
   pHRed_1c <- as.data.frame(pHRed[,-c(1,2)])
-  pHRed_1b[,c(3)]<-rowMeans(pHRed_1c)
+  pHRed_1b[,c(3)] <- rowMeans(pHRed_1c)
+  
   for (m in 1:nrow(pHRed_1c)){
-    pHRed_1b[c(m),c(4)]<-std.error(t(pHRed_1c[c(m),]))
+    pHRed_1b[c(m),c(4)] <- std.error(t(pHRed_1c[c(m),]))
   }
+  
+  # Calculate mean and SEM for original data
   pHRed_1_originalb <- as.data.frame(pHRed_original[,c(1,2)])
   pHRed_1_originalc <- as.data.frame(pHRed_original[,-c(1,2)])
-  pHRed_1_originalb[,c(3)]<-rowMeans(pHRed_original)
+  pHRed_1_originalb[,c(3)] <- rowMeans(pHRed_original)
+  
   for (m in 1:nrow(pHRed_1_originalc)){
-    pHRed_1_originalb[c(m),c(4)]<-std.error(t(pHRed_1_originalc[c(m),]))
+    pHRed_1_originalb[c(m),c(4)] <- std.error(t(pHRed_1_originalc[c(m),]))
   }
   
-  write.csv(pHRed,paste0(output_path,"/normalized_pHRed_",downloaded_file))
-  write.csv(pHRed_original,paste0(output_path,"/original_pHRed_",downloaded_file))
-  write.csv(pHRed_1b,paste0(output_path,"/normalized_pHRed_mean_SEM_",downloaded_file))
-  write.csv(pHRed_1_originalb,paste0(output_path,"/original_pHRed_uncorrected_mean_SEM_",downloaded_file))
+  # Save pHrodo results
+  write.csv(pHRed, paste0(output_path, "/normalized_pHRed_", downloaded_file))
+  write.csv(pHRed_original, paste0(output_path, "/original_pHRed_", downloaded_file))
+  write.csv(pHRed_1b, paste0(output_path, "/normalized_pHRed_mean_SEM_", downloaded_file))
+  write.csv(pHRed_1_originalb, paste0(output_path, "/original_pHRed_uncorrected_mean_SEM_", downloaded_file))
   
-  #the following section is for pH correction
+  # pH correction for Laconic sensor data
+  # =================================================================
   final_ratios_corrected <- final_ratios
+  
   for (l in 3:ncol(final_ratios)){
-    new_col <- as.data.frame(cbind(final_ratios[,c(l)],pHRed[,c(l)]))
-    colnames(new_col)<-c("laconic","pHRed")
+    # Combine Laconic and pHrodo data
+    new_col <- as.data.frame(cbind(final_ratios[,c(l)], pHRed[,c(l)]))
+    colnames(new_col) <- c("laconic","pHRed")
     
+    # Separate and normalize baseline and post-treatment periods
     new_col2a <- new_col[c(1:(which(final_ratios$...1==1)-1)),]
     new_col2b <- new_col[c((which(final_ratios$...1==3)-1):nrow(new_col)),]
-    new_col2b[,1]<-new_col2b[,1]/new_col2b[1,1]
-    new_col2b[,2]<-new_col2b[,2]/new_col2b[1,2]
+    new_col2b[,1] <- new_col2b[,1]/new_col2b[1,1]
+    new_col2b[,2] <- new_col2b[,2]/new_col2b[1,2]
     new_col2b <- as.data.frame(new_col2b[-c(1),])
     new_col3 <- as.data.frame(rbind(new_col2a,new_col2b))
     new_col3 <- new_col3-1
     
-   
-    lm_laconic_pH = lm(laconic~pHRed, data = new_col3) 
-    lm_laconic_pH_vals<- as.data.frame(tidy(lm_laconic_pH))
+    # Linear regression of Laconic vs pH changes
+    lm_laconic_pH = lm(laconic~pHRed, data = new_col3)
+    lm_laconic_pH_vals <- as.data.frame(tidy(lm_laconic_pH))
     m <- as.numeric(lm_laconic_pH_vals[2,2])
     c <- as.numeric(lm_laconic_pH_vals[1,2])
-    new_col <- new_col-1
-    new_col <- new_col %>% mutate (laconic_corrected = m*(new_col$pHRed)+c)
-    new_col <- new_col %>% mutate(laconic_corrected2 = 1+(new_col$laconic-new_col$laconic_corrected))
-    new_col <- new_col %>% mutate(laconic_corrected2 = new_col$laconic_corrected2/mean(new_col[c(1:(which(final_ratios$...1==1)-1)),4]))
     
-    final_ratios_corrected[,c(l)]<-new_col$laconic_corrected2
+    # Apply pH correction
+    new_col <- new_col-1
+    new_col <- new_col %>% 
+      mutate(laconic_corrected = m*(new_col$pHRed)+c) %>%
+      mutate(laconic_corrected2 = 1+(new_col$laconic-new_col$laconic_corrected)) %>%
+      mutate(laconic_corrected2 = new_col$laconic_corrected2/mean(new_col[c(1:(which(final_ratios$...1==1)-1)),4]))
+    
+    final_ratios_corrected[,c(l)] <- new_col$laconic_corrected2
   }
+  
+  # Calculate mean and SEM for pH-corrected data
   final_ratios_correctedb <- as.data.frame(final_ratios_corrected[,c(1,2)])
   final_ratios_correctedc <- as.data.frame(final_ratios_corrected[,-c(1,2)])
-  final_ratios_correctedb[,c(3)]<-rowMeans(final_ratios_correctedc)
+  final_ratios_correctedb[,c(3)] <- rowMeans(final_ratios_correctedc)
+  
   for (m in 1:nrow(final_ratios_correctedc)){
-    final_ratios_correctedb[c(m),c(4)]<-std.error(t(final_ratios_correctedc[c(m),]))
+    final_ratios_correctedb[c(m),c(4)] <- std.error(t(final_ratios_correctedc[c(m),]))
   }
-  write.csv(final_ratios_corrected,paste0(output_path,"/normalized_laconic_ratios_pH_corrected_",file_uploaded))
-  write.csv(final_ratios_correctedb,paste0(output_path,"/normalized_laconic_ratios_pH_corrected_mean_SEM_",file_uploaded))
-   
+  
+  # Save pH-corrected results
+  write.csv(final_ratios_corrected, paste0(output_path, "/normalized_laconic_ratios_pH_corrected_", file_uploaded))
+  write.csv(final_ratios_correctedb, paste0(output_path, "/normalized_laconic_ratios_pH_corrected_mean_SEM_", file_uploaded))
+  
+  # Calculate area under curve for pH-corrected data
   area_list1 <- as.data.frame(matrix(0,nrow=0,ncol=1))
+  
   for (k in 3:ncol(final_ratios_corrected)){
+    # Get treatment period data
     col1 <- as.data.frame(final_ratios_corrected[c(which(final_ratios_corrected$...1==1):(which(final_ratios_corrected$...1==2)-1)),c(2,k)])
-    colnames(col1)<-c("time","ratio")
+    colnames(col1) <- c("time","ratio")
+    
+    # Get baseline period data
     precol1 <- as.data.frame(final_ratios_corrected[c(1:(which(final_ratios_corrected$...1==1)-1)),c(2,k)])
-    colnames(precol1)<-c("time","ratio")
+    colnames(precol1) <- c("time","ratio")
     precol2 <- as.data.frame(rbind(precol1,col1))
+    
+    # Set up periods for causal impact analysis
     pre.period <- c(1,nrow(precol1))
     post.period <- c((nrow(precol1)+1),nrow(precol2))
     precol2 <- as.data.frame(precol2[,order(ncol(precol2):1)])
+    
+    # Perform causal impact analysis
     impact <- CausalImpact(precol2, pre.period, post.period)
     impact_vals <- as.data.frame(impact$series)
-    impact_vals<- as.data.frame(impact_vals[-c(1:nrow(precol1)),])
+    impact_vals <- as.data.frame(impact_vals[-c(1:nrow(precol1)),])
     
-    col1 <- col1 %>% mutate (base=impact_vals$point.pred) 
+    # Calculate area under curve
+    col1 <- col1 %>% mutate(base=impact_vals$point.pred)
     time1 <- as.numeric(min(col1$time))
     time2 <- as.numeric(max(col1$time))
-    area1 <- auc(col1$time,col1$ratio,from = time1,to=time2)
-    area2 <- auc(col1$time,col1$base,from = time1,to=time2)
+    area1 <- auc(col1$time, col1$ratio, from=time1, to=time2)
+    area2 <- auc(col1$time, col1$base, from=time1, to=time2)
     area <- as.data.frame((area1-area2)/nrow(col1))
-    colnames(area)<-c("area")
-    colnames(area_list1)<-colnames(area)
-    area_list1 <- as.data.frame(rbind(area_list1,area))
+    
+    # Store results
+    colnames(area) <- c("area")
+    colnames(area_list1) <- colnames(area)
+    area_list1 <- as.data.frame(rbind(area_list1, area))
   }
   
-  write.csv(area_list1,paste0(output_path,"/AUC_per_time_pH_corrected_",file_uploaded))
-  
+  # Save pH-corrected AUC results
+  write.csv(area_list1, paste0(output_path, "/AUC_per_time_pH_corrected_", file_uploaded))
 }
-
-
-
