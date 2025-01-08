@@ -1,5 +1,5 @@
 # =================================================================
-# Fluorescence Analysis Script
+# Laconic Fluorescence Analysis Script
 # =================================================================
 # This script analyzes fluorescence microscopy data from dual-channel imaging
 # It processes both Laconic sensor (CFP/YFP) and pHrodo measurements
