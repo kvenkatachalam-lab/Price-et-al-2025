@@ -1,0 +1,475 @@
+# =================================================================
+# PercevalHR Fluorescence Analysis Script
+# =================================================================
+# This script analyzes fluorescence microscopy data from dual-channel imaging
+# Processes ADP and ATP channels with pHrodo measurements
+# Performs background subtraction, photobleaching correction, and pH corrections
+# =================================================================
+
+# INPUT FILE REQUIREMENTS
+# =================================================================
+# 1. File Naming Convention:
+#    - Main data files should contain both ADP and ATP channels
+#    - pHrodo files should have "pHrodo" in the filename
+#    - Each main file must have a matching pHrodo file
+#
+# 2. Data File Format:
+#    - CSV file with columns:
+#    - Column 1: Frame number
+#    - Column 2: Time [m:s]
+#    - Multiple columns for ADP measurements
+#    - Multiple columns for ATP measurements
+#    - Last column in each channel should be background measurement
+#
+# 3. Data Requirements:
+#    - Time points must be aligned between files
+#    - Background measurements must be included
+#    - No missing values in measurement columns
+# =================================================================
+
+# Load required packages
+library(tidyverse)  # For data manipulation and visualization
+library(readr)      # For reading CSV files
+library(rowr)       # For row operations
+library(MESS)       # For AUC calculations
+library(broom)      # For converting statistical objects to tidy data frames
+library(varhandle)  # For variable handling
+library(plotrix)    # For error calculations
+library(aomisc)     # For curve fitting
+library(CausalImpact)  # For time series analysis
+
+# Set working directory and file paths
+setwd("~/")  # Change this to your working directory
+input_path <- "xyz"   # Directory containing input files
+output_path <- "abc"  # Directory for saving results
+
+# Get list of input files
+list1 <- as.data.frame(list.files(path=input_path))
+colnames(list1) <- c("files")
+
+# Separate pHrodo files from main data files
+list2 <- as.data.frame(list1[c(which(grepl("pHrodo",list1$files)==T)),])
+colnames(list2) <- c("files")
+list1 <- as.data.frame(list1[-c(which(grepl("pHrodo",list1$files)==T)),])
+colnames(list1) <- c("files")
+
+# Process each file
+for (list_files in 1:nrow(list1)) {
+  # Read current file
+  downloaded_file <- as.character(list1[c(list_files),])
+  ratio_file <- read_csv(paste0(input_path,"/",downloaded_file))
+  
+  # Standardize column names
+  colnames(ratio_file) <- c("...1","Time [m:s]",colnames(ratio_file[,-c(1,2)]))
+  
+  # Extract ADP and ATP channels
+  ratio_file_ADP <- ratio_file[,c(1:2,which(grepl("ADP",colnames(ratio_file))==T))]
+  ratio_file_ATP <- ratio_file[,c(1:2,which(grepl("ATP",colnames(ratio_file))==T))]
+  
+  # Process ADP channel
+  ratio_file_1 <- ratio_file_ADP
+  
+  # Background subtraction for ADP
+  for (j in 3:(ncol(ratio_file_1)-1)){
+    col1 <- as.matrix(ratio_file_1[,c(j)])
+    col1 <- as.numeric(col1)
+    col_back <- as.matrix(ratio_file_1[,c(ncol(ratio_file_1))])
+    ratio_file_1[,c(j)] <- col1-col_back
+  }
+  ratio_file_1[,c(ncol(ratio_file_1))] <- NULL
+  
+  # Store original data
+  ratio_file_1_original <- ratio_file_1
+  
+  # Normalize to baseline
+  for (i in 3:ncol(ratio_file_1)){
+    col1 <- as.data.frame(ratio_file_1[,c(i)])
+    col2 <- col1[c(1:(which(ratio_file_1$...1==1)-1)),]
+    norm_val <- mean(col2)
+    ratio_file_1[,c(i)] <- ratio_file_1[,c(i)]/norm_val
+  }
+  
+  # Get baseline period data
+  ratio_file_1b <- ratio_file_1[c(1:(which(ratio_file_1$...1==1)-1)),]
+  
+  # Process ATP channel
+  ratio_file_2 <- ratio_file_ATP
+  
+  # Background subtraction for ATP
+  for (j in 3:(ncol(ratio_file_1)-1)){
+    col1 <- as.matrix(ratio_file_2[,c(j)])
+    col_back <- as.matrix(ratio_file_2[,c(ncol(ratio_file_2))])
+    ratio_file_2[,c(j)] <- col1-col_back
+  }
+  ratio_file_2[,c(ncol(ratio_file_2))] <- NULL
+  
+  # Store original data
+  ratio_file_2_original <- ratio_file_2
+  
+  # Normalize to baseline
+  for (i in 3:ncol(ratio_file_2)){
+    col1 <- as.data.frame(ratio_file_2[,c(i)])
+    col2 <- col1[c(1:(which(ratio_file_2$...1==1)-1)),]
+    norm_val <- mean(col2)
+    ratio_file_2[,c(i)] <- ratio_file_2[,c(i)]/norm_val
+  }
+  
+  # Get baseline period data
+  ratio_file_2b <- ratio_file_2[c(1:(which(ratio_file_2$...1==1)-1)),]
+  
+  # Photobleaching correction
+  for (i in 3:ncol(ratio_file_1b)){
+    # Process ADP channel
+    col_vals <- as.data.frame(ratio_file_1b[,c(i)])
+    full_data <- as.data.frame(cbind(ratio_file_1b$`Time [m:s]`,col_vals))
+    colnames(full_data) <- c("X","Y")
+    
+    # Try exponential decay fit
+    a <- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    
+    if (grepl("Error",a[1])==T){
+      ratio_file_1[,c(i)] <- ratio_file_1[,c(i)]
+    } else {
+      # Apply exponential decay correction
+      nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
+      nlsfit_vals <- as.data.frame(tidy(nlsfit))
+      full_data2 <- as.data.frame(cbind(ratio_file_1$`Time [m:s]`,ratio_file_1[,c(i)]))
+      colnames(full_data2) <- c("X","Y")
+      
+      # Extract parameters
+      Y0 <- as.numeric(nlsfit_vals[1,2])
+      k <- as.numeric(nlsfit_vals[2,2])
+      
+      # Calculate corrections
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2)
+      
+      # Apply correction based on trend
+      if (full_data2[1,3]>full_data2[nrow(full_data2),3]){
+        ratio_file_1[,c(i)] <- full_data2$Y3
+      } else {
+        ratio_file_1[,c(i)] <- full_data2$Y
+      }
+    }
+    
+    # Process ATP channel
+    col_vals <- as.data.frame(ratio_file_2b[,c(i)])
+    full_data <- as.data.frame(cbind(ratio_file_2b$`Time [m:s]`,col_vals))
+    colnames(full_data) <- c("X","Y")
+    
+    # Try exponential decay fit
+    a <- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    
+    if (grepl("Error",a[1])==T){
+      ratio_file_2[,c(i)] <- ratio_file_2[,c(i)]
+    } else {
+      # Apply exponential decay correction
+      nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
+      nlsfit_vals <- as.data.frame(tidy(nlsfit))
+      full_data2 <- as.data.frame(cbind(ratio_file_2$`Time [m:s]`,ratio_file_2[,c(i)]))
+      colnames(full_data2) <- c("X","Y")
+      
+      # Extract parameters
+      Y0 <- as.numeric(nlsfit_vals[1,2])
+      k <- as.numeric(nlsfit_vals[2,2])
+      
+      # Calculate corrections
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2)
+      
+      # Apply correction based on trend
+      if (full_data2[1,3]>full_data2[nrow(full_data2),3]){
+        ratio_file_2[,c(i)] <- full_data2$Y3
+      } else {
+        ratio_file_2[,c(i)] <- full_data2$Y
+      }
+    }
+  }
+  
+  # Calculate final ratios (ATP/ADP)
+  final_ratios <- as.data.frame(matrix(0,nrow=nrow(ratio_file_1),ncol=ncol(ratio_file_1)))
+  final_ratios[,c(1,2)] <- ratio_file_1[,c(1,2)]
+  colnames(final_ratios) <- colnames(ratio_file_1)
+  
+  for (k in 3:ncol(final_ratios)){
+    val1 <- ratio_file_1[,c(k)]
+    val2 <- ratio_file_2[,c(k)] 
+    final_ratios[,c(k)] <- val2/val1
+  }
+  
+  # Calculate mean and SEM for ADP
+  ratio_file_1b <- as.data.frame(ratio_file_1[,c(1,2)])
+  ratio_file_1c <- as.data.frame(ratio_file_1[,-c(1,2)])
+  ratio_file_1b[,c(3)] <- rowMeans(ratio_file_1c)
+  
+  for (m in 1:nrow(ratio_file_1c)){
+    ratio_file_1b[c(m),c(4)] <- std.error(t(ratio_file_1c[c(m),]))
+  }
+  
+  # Calculate mean and SEM for ATP
+  ratio_file_2b <- as.data.frame(ratio_file_2[,c(1,2)])
+  ratio_file_2c <- as.data.frame(ratio_file_2[,-c(1,2)])
+  ratio_file_2b[,c(3)] <- rowMeans(ratio_file_2c)
+  
+  for (m in 1:nrow(ratio_file_2c)){
+    ratio_file_2b[c(m),c(4)] <- std.error(t(ratio_file_2c[c(m),]))
+  }
+  
+  # Calculate mean and SEM for original data
+  ratio_file_2_originalb <- as.data.frame(ratio_file_2_original[,c(1,2)])
+  ratio_file_2_originalc <- as.data.frame(ratio_file_2_original[,-c(1,2)])
+  ratio_file_2_originalb[,c(3)] <- rowMeans(ratio_file_2_originalc)
+  
+  for (m in 1:nrow(ratio_file_2_originalc)){
+    ratio_file_2_originalb[c(m),c(4)] <- std.error(t(ratio_file_2_originalc[c(m),]))
+  }
+  
+  ratio_file_1_originalb <- as.data.frame(ratio_file_1_original[,c(1,2)])
+  ratio_file_1_originalc <- as.data.frame(ratio_file_1_original[,-c(1,2)])
+  ratio_file_1_originalb[,c(3)] <- rowMeans(ratio_file_1_originalc)
+  
+  for (m in 1:nrow(ratio_file_1_originalc)){
+    ratio_file_1_originalb[c(m),c(4)] <- std.error(t(ratio_file_1_originalc[c(m),]))
+  }
+  
+  # Calculate mean and SEM for final ratios
+  final_ratiosb <- as.data.frame(final_ratios[,c(1,2)])
+  final_ratiosc <- as.data.frame(final_ratios[,-c(1,2)])
+  final_ratiosb[,c(3)] <- rowMeans(final_ratiosc)
+  
+  for (m in 1:nrow(final_ratiosc)){
+    final_ratiosb[c(m),c(4)] <- std.error(t(final_ratiosc[c(m),]))
+  }
+  
+  # Create output directory
+  dir.create(paste0(output_path,"/",downloaded_file))
+  
+  # Save intermediate results
+  write.csv(ratio_file_1,paste0(output_path,"/",downloaded_file,"/normalized_ADP_uncorrected_",downloaded_file))
+  write.csv(ratio_file_2,paste0(output_path,"/",downloaded_file,"/normalized_ATP_uncorrected_",downloaded_file))
+  write.csv(final_ratios,paste0(output_path,"/",downloaded_file,"/normalized_ratios_uncorrected_",downloaded_file))
+  write.csv(ratio_file_1b,paste0(output_path,"/",downloaded_file,"/normalized_ADP_uncorrected_mean_SEM_",downloaded_file))
+  write.csv(ratio_file_2b,paste0(output_path,"/",downloaded_file,"/normalized_ATP_uncorrected_mean_SEM_",downloaded_file))
+  write.csv(final_ratiosb,paste0(output_path,"/",downloaded_file,"/normalized_ratios_uncorrected_mean_SEM_",downloaded_file))
+  
+  # Process pHrodo data
+  # =================================================================
+  # Read pHrodo file
+  downloaded_file <- as.character(list2[c(list_files),])
+  pHRed <- read_csv(paste0(input_path,"/",downloaded_file))
+  colnames(pHRed) <- c("...1","Time [m:s]",colnames(pHRed[,-c(1,2)]))
+  
+  # Process red channel
+  red <- pHRed
+  
+  # Background subtraction
+  for (j in 3:(ncol(red)-1)){
+    col1 <- as.matrix(red[,c(j)])
+    col1 <- as.numeric(col1)
+    col_back <- as.matrix(red[,c(ncol(red))])
+    red[,c(j)] <- col1-col_back
+  }
+  red[,c(ncol(red))] <- NULL
+  
+  # Store original data
+  red_original <- red
+  
+  # Normalize to baseline
+  for (i in 3:ncol(red)){
+    col1 <- as.data.frame(red[,c(i)])
+    col2 <- col1[c(1:(which(red$...1==1)-1)),]
+    norm_val <- mean(col2)
+    red[,c(i)] <- red[,c(i)]/norm_val
+  }
+  
+  # Get baseline period data
+  red_b <- red[c(1:(which(red$...1==1)-1)),]
+  
+  # Photobleaching correction for red channel
+  for (i in 3:ncol(red_b)){
+    col_vals <- as.data.frame(red_b[,c(i)])
+    full_data <- as.data.frame(cbind(red_b$`Time [m:s]`,col_vals))
+    colnames(full_data) <- c("X","Y")
+    
+    # Try exponential decay fit
+    a <- try(nls(Y ~ NLS.expoDecay(X, a, k),data = full_data),silent = TRUE)
+    
+    if (grepl("Error",a[1])==T){
+      red[,c(i)] <- red[,c(i)]
+    } else {
+      # Apply exponential decay correction
+      nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k),data = full_data)
+      nlsfit_vals <- as.data.frame(tidy(nlsfit))
+      full_data2 <- as.data.frame(cbind(red$`Time [m:s]`,red[,c(i)]))
+      colnames(full_data2) <- c("X","Y")
+      
+      # Extract parameters
+      Y0 <- as.numeric(nlsfit_vals[1,2])
+      k <- as.numeric(nlsfit_vals[2,2])
+      
+      # Calculate corrections
+      full_data2 <- full_data2 %>% 
+        mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+        mutate(Y3=full_data2$Y/full_data2$Y2)
+      
+      # Apply correction based on trend
+      if (full_data2[1,3]>full_data2[nrow(full_data2),3]){
+        red[,c(i)] <- full_data2$Y3
+      } else {
+        red[,c(i)] <- full_data2$Y
+      }
+    }
+  }
+  
+  # Calculate mean and SEM for red channel
+  red_1b <- as.data.frame(red[,c(1,2)])
+  red_1c <- as.data.frame(red[,-c(1,2)])
+  red_1b[,c(3)] <- rowMeans(red_1c)
+  
+  for (m in 1:nrow(red_1c)){
+    red_1b[c(m),c(4)] <- std.error(t(red_1c[c(m),]))
+  }
+  
+  # Calculate mean and SEM for original red data
+  red_1_originalb <- as.data.frame(red_original[,c(1,2)])
+  red_1_originalc <- as.data.frame(red_original[,-c(1,2)])
+  red_1_originalb[,c(3)] <- rowMeans(red_original)
+  
+  for (m in 1:nrow(red_1_originalc)){
+    red_1_originalb[c(m),c(4)] <- std.error(t(red_1_originalc[c(m),]))
+  }
+  
+  # Store pHrodo results
+  final_ratios_pHRed <- red
+  
+  # Create output directory for pHrodo results
+  dir.create(paste0(output_path,"/",downloaded_file))
+  
+  # Save pHrodo results
+  write.csv(red,paste0(output_path,"/",downloaded_file,"/normalized_pHRed_red_uncorrected_",downloaded_file))
+  write.csv(red_1b,paste0(output_path,"/",downloaded_file,"/normalized_pHRed_red_uncorrected_mean_SEM_",downloaded_file))
+  
+  # pH correction analysis
+  # =================================================================
+  # Initialize fit values table
+  fit_vals <- as.data.frame(matrix(0,nrow=0,ncol=2))
+  colnames(fit_vals) <- c("slope","intercept")
+  
+  # Initialize corrected ratios
+  final_ratios_corrected <- final_ratios
+  
+  # Process each measurement
+  for (l in 3:ncol(final_ratios)){
+    # Combine ratio and pH data
+    new_col <- as.data.frame(cbind(final_ratios[,c(l)],final_ratios_pHRed[,c(l)]))
+    colnames(new_col) <- c("percHR","pHRed")
+    
+    # Get treatment points
+    additions <- as.data.frame(unique(final_ratios$...1))
+    additions <- as.data.frame(additions[-c(is.na(additions$`unique(final_ratios$...1)`)==T),])
+    colnames(additions) <- c("additions")
+    
+    # Calculate NHCL point
+    NHCL <- as.numeric(additions[c(nrow(additions)),])-1
+    
+    # Separate and normalize baseline and post-treatment data
+    new_col2a <- new_col[c(1:(which(final_ratios$...1==1)-1)),]
+    new_col2b <- new_col[c((which(final_ratios$...1==NHCL)-1):nrow(new_col)),]
+    new_col2b[,1] <- new_col2b[,1]/new_col2b[1,1]
+    new_col2b[,2] <- new_col2b[,2]/new_col2b[1,2]
+    new_col2b <- as.data.frame(new_col2b[-c(1),])
+    new_col3 <- as.data.frame(rbind(new_col2a,new_col2b))
+    new_col3 <- new_col3-1
+    
+    # Linear regression of percHR vs pH
+    lm_percHR_pH = lm(percHR~pHRed, data = new_col3)
+    lm_percHR_pH_vals <- as.data.frame(tidy(lm_percHR_pH))
+    m <- as.numeric(lm_percHR_pH_vals[2,2])
+    c <- as.numeric(lm_percHR_pH_vals[1,2])
+    
+    # Store fit values
+    fit_vals[c(l-2),1] <- m
+    fit_vals[c(l-2),2] <- c
+    
+    # Apply pH correction
+    new_col <- new_col-1
+    new_col <- new_col %>% 
+      mutate(percHR_corrected = m*(new_col$pHRed)+c) %>%
+      mutate(percHR_corrected2 = 1+(new_col$percHR-new_col$percHR_corrected)) %>%
+      mutate(percHR_corrected2 = new_col$percHR_corrected2/mean(new_col[c(1:(which(final_ratios$...1==1)-1)),4]))
+    
+    final_ratios_corrected[,c(l)] <- new_col$percHR_corrected2
+  }
+  
+  # Calculate mean and SEM for pH-corrected data
+  final_ratios_correctedb <- as.data.frame(final_ratios_corrected[,c(1,2)])
+  final_ratios_correctedc <- as.data.frame(final_ratios_corrected[,-c(1,2)])
+  final_ratios_correctedb[,c(3)] <- rowMeans(final_ratios_correctedc)
+  
+  for (m in 1:nrow(final_ratios_correctedc)){
+    final_ratios_correctedb[c(m),c(4)] <- std.error(t(final_ratios_correctedc[c(m),]))
+  }
+  
+  # Save pH correction results
+  write.csv(final_ratios_corrected,paste0(output_path,"/",downloaded_file,"/normalized_ratios_pH_corrected_percHR.csv"))
+  write.csv(final_ratios_correctedb,paste0(output_path,"/",downloaded_file,"/normalized_ratios_pH_corrected_mean_SEM_percHR.csv"))
+  write.csv(fit_vals,paste0(output_path,"/",downloaded_file,"/fit_vals.csv"))
+  
+  # Calculate area under curve for corrected data
+  # =================================================================
+  area_list1 <- as.data.frame(matrix(0,nrow=(ncol(final_ratios_corrected)-2),ncol=1))
+  
+  # Process each treatment period
+  for (x in 1:1){
+    area_list <- as.data.frame(matrix(0,nrow=0,ncol=1))
+    
+    for (k in 3:ncol(final_ratios_corrected)){
+      if (x<nrow(additions)){
+        # Get treatment period data
+        col1 <- as.data.frame(final_ratios_corrected[c(which(final_ratios_corrected$...1==x):(which(final_ratios_corrected$...1==(x+1))-1)),c(2,k)])
+        colnames(col1) <- c("time","ratio")
+        col1 <- col1 %>% mutate(base=as.numeric(final_ratios_corrected[c((which(final_ratios_corrected$...1==x)-1)),c(k)]))
+        col1 <- unfactor(col1)
+        
+        # Calculate AUC
+        time1 <- as.numeric(min(col1$time))
+        time2 <- as.numeric(max(col1$time))
+        area1 <- auc(col1$time,col1$ratio,from = time1,to=time2)
+        area2 <- auc(col1$time,col1$base,from = time1,to=time2)
+        area <- as.data.frame((area1-area2)/nrow(col1))
+        
+        # Store results
+        colnames(area) <- c("area")
+        colnames(area_list) <- colnames(area)
+        area_list <- as.data.frame(rbind(area_list,area))
+      } else {
+        # Process final period
+        col1 <- as.data.frame(final_ratios_corrected[c(which(final_ratios_corrected$...1==x):nrow(final_ratios_corrected)),c(2,k)])
+        colnames(col1) <- c("time","ratio")
+        col1 <- col1 %>% mutate(base=as.numeric(final_ratios[c((which(final_ratios$...1==x)-1)),c(k)]))
+        col1 <- unfactor(col1)
+        
+        # Calculate AUC
+        time1 <- as.numeric(min(col1$time))
+        time2 <- as.numeric(max(col1$time))
+        area1 <- auc(col1$time,col1$ratio,from = time1,to=time2)
+        area2 <- auc(col1$time,col1$base,from = time1,to=time2)
+        area <- as.data.frame((area1-area2)/nrow(col1))
+        
+        # Store results
+        colnames(area) <- c("area")
+        colnames(area_list) <- colnames(area)
+        area_list <- as.data.frame(rbind(area_list,area))
+      }
+    }
+    area_list1 <- as.data.frame(cbind(area_list1,area_list))
+  }
+  
+  # Clean up and save AUC results
+  area_list1[,c(1)] <- NULL
+  write.csv(area_list1,paste0(output_path,"/AUC_per_time_",downloaded_file))
+  
+}  
+                              
