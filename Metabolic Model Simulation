@@ -1,0 +1,195 @@
+# =================================================================
+# Metabolic Model Simulation
+# =================================================================
+# This script simulates cellular metabolism focusing on:
+# - Trehalose to glucose conversion
+# - Glucose and lactate consumption
+# - ATP production and consumption
+# - Oxygen-dependent regulation
+# 
+# =================================================================
+
+# Load required packages
+library(tidyverse)  # For data manipulation and visualization
+library(readr)      # For reading/writing files
+library(rowr)       # For row operations
+library(deSolve)    # For solving differential equations
+library(aomisc)     # For additional mathematical functions
+library(broom)      # For tidying model outputs
+library(MESS)       # For miscellaneous functions
+
+# Set working directory
+setwd("~/")
+
+# =================================================================
+# Model Configuration
+# =================================================================
+
+# Treatment Parameters
+lactate_coupling_factor <- 0    # Glycolysis-LDH coupling (0: uncoupled, 0.5: coupled)
+ATP_vals <- 60                  # ATP concentration (range: 1-100)
+k_oxygen_consumption = 0.1      # Oxygen consumption rate (range: 0.1-0.6)
+
+# Initial State Values
+trehalose_vals <- 100          # Initial trehalose concentration
+glucose_vals <- 10             # Initial glucose concentration
+Lactate_vals <- 80            # Initial lactate concentration
+Oxygen_vals <- 100            # Initial oxygen concentration
+
+# =================================================================
+# Model Definition
+# =================================================================
+
+metabolic_model <- function(t, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    # Calculate oxygen-dependent regulation factors
+    # Higher oxygen levels increase substrate consumption
+    oxygen_factor_lactate = Oxygen^n_lactate / (K_oxygen_lactate^n_lactate + Oxygen^n_lactate)
+    oxygen_factor_glucose = Oxygen^n_glucose / (K_oxygen_glucose^n_glucose + Oxygen^n_glucose)
+    
+    # Calculate metabolic rates
+    # 1. Trehalose conversion to glucose
+    v_trehalose_consumption = k_trehalose * trehalose
+    
+    # 2. Substrate consumption rates
+    # Glucose consumption is inhibited by ATP (feedback inhibition)
+    v_glucose_consumption = k_glucose * glucose * (K_atp / (K_atp + ATP)) * oxygen_factor_glucose
+    
+    # Lactate consumption is inhibited by ATP and regulated by glucose levels
+    v_lactate_consumption = k_lactate * Lactate * (K_atp / (K_atp + ATP)) * 
+      (K_glucose / (K_glucose + glucose)) * oxygen_factor_lactate
+    
+    # 3. ATP production
+    # Calculate ATP production from both substrates
+    v_atp_production_glucose = yield_atp_glucose * v_glucose_consumption 
+    v_atp_production_lactate = yield_atp_lactate * v_lactate_consumption 
+    v_atp_production = v_atp_production_glucose + v_atp_production_lactate
+    
+    # 4. ATP consumption (balanced with production)
+    v_atp_consumption = v_atp_production 
+    
+    # 5. Oxygen consumption
+    # Proportional to total substrate consumption
+    v_oxygen_consumption = k_oxygen_consumption * (v_glucose_consumption + v_lactate_consumption)
+    
+    # Define differential equations
+    # Each equation represents the rate of change for a metabolite
+    dtrehalose = -v_trehalose_consumption
+    dglucose = -v_glucose_consumption + (2 * v_trehalose_consumption)  # 2 glucose per trehalose
+    dLactate = -v_lactate_consumption + (lactate_coupling_factor * v_glucose_consumption)
+    dATP = 0  # ATP remains constant (production = consumption)
+    dOxygen = -v_oxygen_consumption
+    
+    # Return rates of change
+    list(c(dtrehalose, dglucose, dLactate, dATP, dOxygen))
+  })
+}
+
+# =================================================================
+# Model Parameters
+# =================================================================
+
+# Set model parameters
+parameters <- c(
+  # Kinetic constants
+  k_trehalose = 0.01,          # Rate constant for trehalose breakdown
+  k_glucose = 0.1,             # Rate constant for glucose consumption
+  k_lactate = 0.03,            # Rate constant for lactate consumption
+  
+  # Regulatory parameters
+  K_atp = 100,                 # ATP concentration for half-maximal inhibition
+  K_glucose = 10,              # Glucose concentration for half-maximal lactate consumption
+  
+  # Yield coefficients
+  yield_atp_glucose = 32,      # ATP molecules produced per glucose
+  yield_atp_lactate = 30,      # ATP molecules produced per lactate
+  
+  # Oxygen regulation
+  K_oxygen_lactate = 50,       # Oxygen level for half-maximal lactate consumption
+  K_oxygen_glucose = 50,       # Oxygen level for half-maximal glucose consumption
+  n_lactate = 2,               # Hill coefficient for lactate oxygen dependency
+  n_glucose = 2                # Hill coefficient for glucose oxygen dependency
+)
+
+# =================================================================
+# Simulation Phase 1 - Initial State
+# =================================================================
+
+# Set initial conditions
+initial_state <- c(
+  trehalose = trehalose_vals,
+  glucose = glucose_vals,
+  Lactate = Lactate_vals,
+  ATP = ATP_vals,
+  Oxygen = Oxygen_vals
+)
+
+# Define simulation time points
+times <- seq(0, 100, by = 0.1)
+
+# Run initial simulation
+out <- ode(y = initial_state, 
+           times = times, 
+           func = metabolic_model, 
+           parms = parameters)
+
+# Store results
+results3 <- as.data.frame(out)
+
+# =================================================================
+# Simulation Phase 2 - Continued from Phase 1
+# =================================================================
+
+# Update initial state based on Phase 1 results
+initial_state <- c(
+  trehalose = results3[nrow(results3), 2],
+  glucose = results3[nrow(results3), 3],
+  Lactate = results3[nrow(results3), 4],
+  ATP = ATP_vals,                           # ATP kept constant
+  Oxygen = results3[nrow(results3), 6]
+)
+
+# Run second simulation
+out <- ode(y = initial_state, 
+           times = times, 
+           func = metabolic_model, 
+           parms = parameters)
+
+# Store results
+results1 <- as.data.frame(out)
+
+# =================================================================
+# Simulation Phase 3 - Modified Initial Conditions
+# =================================================================
+
+# Set new initial state
+initial_state <- c(
+  trehalose = trehalose_vals,              # Reset trehalose
+  glucose = results1[nrow(results1), 3],   # Use final glucose from Phase 2
+  Lactate = results1[nrow(results1), 4],   # Use final lactate from Phase 2
+  ATP = ATP_vals,                          # ATP kept constant
+  Oxygen = Oxygen_vals                     # Reset oxygen
+)
+
+# Run final simulation
+out <- ode(y = initial_state, 
+           times = times, 
+           func = metabolic_model, 
+           parms = parameters)
+
+# Store results
+results2 <- as.data.frame(out)
+
+# =================================================================
+# Combine Results
+# =================================================================
+
+# Standardize column names
+colnames(results3) <- colnames(results1)
+colnames(results2) <- colnames(results1)
+
+# Combine all simulation results
+results <- rbind(results3, results1, results2)
+
+# Add continuous time sequence
+results$time <- seq(0, 300.2, by = 0.1)
