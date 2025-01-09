@@ -1,0 +1,251 @@
+# =================================================================
+# Neural Network Time Series Prediction Model
+# =================================================================
+# This script uses deep learning to predict post-treatment metabolic 
+# responses based on pre-treatment signal fluctuations.
+#
+# Key Features:
+# 1. Uses pre-treatment time series (first 8 time points) to predict 
+#    post-treatment response
+# 2. Implements 5-fold cross-validation for robust validation
+# 3. Includes comparison with randomized data as control
+# 4. Provides detailed error analysis for model evaluation
+#
+# Model Architecture:
+# - Input: Pre-treatment time series data
+# - Hidden layer: 50 units with L1/L2 regularization
+# - Dropout layer (20%) for preventing overfitting
+# - Output: Predicted post-treatment response
+# =================================================================
+
+# Load required packages
+library(tidyverse)  # For data manipulation
+library(readr)      # For reading CSV files
+library(keras)      # For deep learning
+library(caret)      # For cross-validation
+
+# Set working directory
+setwd("~/")
+
+# =================================================================
+# Data Loading and Preprocessing
+# =================================================================
+
+# Define parameters
+folder <- "control"  # Can be modified for different treatment groups
+dir_used <- "xyz"
+
+# Read time series data
+trace_table <- read_csv(paste0(dir_used, folder, "/", folder, " pH corrected.csv"))
+
+# Scale data and preserve scaling parameters
+trace_table2B <- t(scale(trace_table[,-c(1:2)]))
+original_means <- attr(trace_table2B, "scaled:center")
+original_sds <- attr(trace_table2B, "scaled:scale")
+
+# Split into pre and post-treatment data
+# Pre-treatment: First 8 time points
+trace_table2 <- trace_table2B[,1:8]
+# Post-treatment: Remaining time points
+trace_table3 <- trace_table2B[,-c(1:8)]
+
+# Create randomized version for control comparison
+trace_table3B <- trace_table2B[,sample(ncol(trace_table2B))]
+trace_table3B <- trace_table3B[,-c(1:8)]
+
+# Create 5-fold cross-validation splits
+folds <- createFolds(trace_table3[,1], k = 5)
+
+# Initialize error tracking
+error_final <- as.data.frame(numeric(length(folds)))
+
+# Create output directory
+dir.create(paste0(dir_used,"/timecourse prediction/",folder))
+
+# =================================================================
+# Cross-validation Loop
+# =================================================================
+
+for(i in seq_along(folds)) {
+  # Split data into training and test sets
+  test_indices <- folds[[i]]
+  x_train <- as.matrix(trace_table2[-test_indices, ])
+  y_train <- as.matrix(trace_table3[-test_indices, ])
+  x_test <- as.matrix(trace_table2[test_indices, ])
+  y_train2 <- as.matrix(trace_table3B[-test_indices, ])  # Randomized training data
+  y_test <- as.matrix(trace_table3[test_indices, ])
+  
+  # =================================================================
+  # Model Definition
+  # =================================================================
+  
+  # Create sequential model
+  model <- keras_model_sequential() %>%
+    # Dense layer with L1/L2 regularization
+    layer_dense(units = 50, 
+                activation = 'linear',
+                kernel_regularizer = regularizer_l1_l2(l1 = 0.01, l2 = 0.01)) %>%
+    # Dropout layer for regularization
+    layer_dropout(rate = 0.2) %>%
+    # Output layer
+    layer_dense(units = ncol(y_train), activation = 'linear')
+  
+  # Compile model
+  model %>% compile(
+    loss = "mean_squared_error",
+    optimizer = optimizer_adam(0.001)
+  )
+  
+  # =================================================================
+  # Model Training and Evaluation - Regular Data
+  # =================================================================
+  
+  # Train model
+  history <- model %>% fit(
+    x_train,
+    y_train,
+    epochs = 100,
+    batch_size = 128
+  )
+  
+  # Evaluate on test set
+  prediction <- model %>% predict(x_test)
+  
+  # Handle missing values in scaling parameters
+  original_sds[is.na(original_sds)] <- 1
+  
+  # Rescale predictions and original data
+  rescaled_prediction <- sweep(sweep(prediction, 2, original_sds, FUN = "*"), 
+                               2, original_means, FUN = "+")
+  rescaled_prediction <- t(rescaled_prediction)
+  
+  rescaled_original <- sweep(sweep(y_test, 2, original_sds, FUN = "*"), 
+                             2, original_means, FUN = "+")
+  rescaled_original <- t(rescaled_original)
+  
+  # Calculate errors
+  error <- (rescaled_original - rescaled_prediction)^2
+  error_list <- colMeans(error)
+  
+  # Save test results
+  write.csv(rescaled_prediction,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_test_predicted_data_",i,".csv"))
+  write.csv(rescaled_original,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_test_original_data_",i,".csv"))
+  
+  # Store median test error
+  error_final[i,1] <- median(error_list)
+  
+  # Save error list
+  error_list <- as.data.frame(error_list)
+  write.csv(error_list,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_test_error_list",i,".csv"))
+  
+  # =================================================================
+  # Evaluate Training Set Performance
+  # =================================================================
+  
+  # Generate predictions for training set
+  prediction <- model %>% predict(x_train)
+  
+  # Rescale predictions and original data
+  rescaled_prediction <- sweep(sweep(prediction, 2, original_sds, FUN = "*"), 
+                               2, original_means, FUN = "+")
+  rescaled_prediction <- t(rescaled_prediction)
+  
+  rescaled_original <- sweep(sweep(y_train, 2, original_sds, FUN = "*"), 
+                             2, original_means, FUN = "+")
+  rescaled_original <- t(rescaled_original)
+  
+  # Calculate errors
+  error <- (rescaled_original - rescaled_prediction)^2
+  error_list <- colMeans(error)
+  
+  # Save training results
+  write.csv(rescaled_prediction,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_train_predicted_data_",i,".csv"))
+  write.csv(rescaled_original,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_train_original_data_",i,".csv"))
+  
+  # Store median training error
+  error_final[i,2] <- median(error_list)
+  
+  # =================================================================
+  # Model Training and Evaluation - Randomized Data
+  # =================================================================
+  
+  # Train model on randomized data
+  history <- model %>% fit(
+    x_train,
+    y_train2,
+    epochs = 100,
+    batch_size = 128
+  )
+  
+  # Generate predictions
+  prediction <- model %>% predict(x_test)
+  
+  # Rescale predictions and original data
+  rescaled_prediction <- sweep(sweep(prediction, 2, original_sds, FUN = "*"), 
+                               2, original_means, FUN = "+")
+  rescaled_prediction <- t(rescaled_prediction)
+  
+  rescaled_original <- sweep(sweep(y_test, 2, original_sds, FUN = "*"), 
+                             2, original_means, FUN = "+")
+  rescaled_original <- t(rescaled_original)
+  
+  # Calculate errors
+  error <- (rescaled_original - rescaled_prediction)^2
+  error_list <- colMeans(error)
+  
+  # Save randomized test results
+  write.csv(rescaled_prediction,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_random_test_predicted_data_",i,".csv"))
+  write.csv(rescaled_original,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_random_test_original_data_",i,".csv"))
+  
+  # Store median randomized test error
+  error_final[i,3] <- median(error_list)
+  
+  # Save error list
+  error_list <- as.data.frame(error_list)
+  write.csv(error_list,
+            paste0(dir_used,"/timecourse prediction/",folder,"/",
+                   folder,"_random_test_error_list",i,".csv"))
+}
+
+# =================================================================
+# Save Final Results
+# =================================================================
+
+# Label error columns
+colnames(error_final) <- c("test","train","random_test")
+
+# Save final error summary
+write.csv(error_final,
+          paste0(dir_used,"/timecourse prediction/",folder,"/",
+                 folder,"_error_final.csv"))
+
+# =================================================================
+# Analysis Complete
+# =================================================================
+# Output files include:
+# 1. Predicted and original data for each fold:
+#    - Test set predictions
+#    - Training set predictions
+#    - Randomized test predictions
+# 2. Error metrics:
+#    - Per-timepoint error lists
+#    - Summary of median errors for each fold
+# 3. Comparison between:
+#    - Test set performance
+#    - Training set performance
+#    - Random data performance (control)
+# =================================================================
