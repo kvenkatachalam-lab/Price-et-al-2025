@@ -1,0 +1,280 @@
+# =================================================================
+# Stochastic Metabolic Model Simulation
+# =================================================================
+# This script simulates cellular metabolism with stochastic variations to
+# model population-level metabolic heterogeneity. It includes:
+# - Random sampling of ATP levels and oxygen consumption rates
+# - Gaussian noise addition to simulate biological variability
+# - Multiple simulation runs to model neuron population
+# 
+# =================================================================
+
+# Load required packages
+library(tidyverse)  # For data manipulation and visualization
+library(readr)      # For reading/writing files
+library(rowr)       # For row operations
+library(deSolve)    # For solving differential equations
+library(aomisc)     # For additional mathematical functions
+library(broom)      # For tidying model outputs
+library(MESS)       # For miscellaneous functions
+
+# Set working directory
+setwd("~/")
+
+# =================================================================
+# Simulation Parameters
+# =================================================================
+
+# Simulation control parameters
+noise_level <- 0.005          # Gaussian noise level for traces
+lactate_coupling_factor <- 0  # Glycolysis-LDH coupling (0: uncoupled, 0.5: coupled)
+repeats <- 300                # Number of neurons to simulate
+
+# =================================================================
+# Helper Functions
+# =================================================================
+
+# Function to add Gaussian noise to traces
+add_noise <- function(x, noise_level) {
+  # Add noise proportional to maximum signal value
+  x + rnorm(length(x), mean = 0, sd = noise_level * max(x))
+}
+
+# =================================================================
+# Model Definition
+# =================================================================
+
+metabolic_model <- function(t, state, parameters) {
+  with(as.list(c(state, parameters)), {
+    # 1. Calculate oxygen-dependent regulation factors
+    oxygen_factor_lactate = Oxygen^n_lactate / (K_oxygen_lactate^n_lactate + Oxygen^n_lactate)
+    oxygen_factor_glucose = Oxygen^n_glucose / (K_oxygen_glucose^n_glucose + Oxygen^n_glucose)
+    
+    # 2. Substrate conversion and consumption
+    # Trehalose breakdown
+    v_trehalose_consumption = k_trehalose * trehalose
+    
+    # Glucose consumption with ATP and oxygen regulation
+    v_glucose_consumption = k_glucose * glucose * (K_atp / (K_atp + ATP)) * oxygen_factor_glucose 
+    
+    # Lactate consumption with multiple regulatory factors
+    v_lactate_consumption = k_lactate * Lactate * (K_atp / (K_atp + ATP)) * 
+      (K_glucose / (K_glucose + glucose)) * oxygen_factor_lactate
+    
+    # 3. Energy metabolism
+    # Calculate ATP production from each substrate
+    v_atp_production_glucose = yield_atp_glucose * v_glucose_consumption 
+    v_atp_production_lactate = yield_atp_lactate * v_lactate_consumption 
+    v_atp_production = v_atp_production_glucose + v_atp_production_lactate
+    
+    # ATP consumption (balanced with production)
+    v_atp_consumption = v_atp_production 
+    
+    # 4. Oxygen utilization
+    v_oxygen_consumption = k_oxygen_consumption * (v_glucose_consumption + v_lactate_consumption)
+    
+    # 5. System dynamics (differential equations)
+    dtrehalose = -v_trehalose_consumption
+    dglucose = -v_glucose_consumption + (2 * v_trehalose_consumption)  # 2 glucose per trehalose
+    dLactate = -v_lactate_consumption + (lactate_coupling_factor * v_glucose_consumption)
+    dATP = 0  # ATP steady state
+    dOxygen = -v_oxygen_consumption
+    
+    # Return rates of change
+    list(c(dtrehalose, dglucose, dLactate, dATP, dOxygen))
+  })
+}
+
+# Initialize output table for storing results
+output_table <- as.data.frame(matrix(0, nrow=repeats, ncol=4))
+colnames(output_table) <- c("ATP", "rate constant for oxygen consumption", "k", "AUC")
+
+# =================================================================
+# Main Simulation Loop
+# =================================================================
+
+for(repeats in 1:repeats) {
+  # Random parameter sampling
+  ATP_vals <- sample(1:100, 1)  # Random ATP level
+  
+  # Two-component mixture for oxygen consumption rate
+  # 80% probability: low range (0-0.2)
+  # 20% probability: high range (0.2-0.6)
+  k_oxygen_consumption = sample(
+    c(runif(1, min = 0, max = 0.2),    # Low range
+      runif(1, min = 0.2, max = 0.6)), # High range
+    size = 1,
+    prob = c(0.8, 0.2)                 # Probability weights
+  )
+  
+  # Fixed initial conditions
+  trehalose_vals <- 100
+  glucose_vals <- 10
+  Lactate_vals <- 80
+  Oxygen_vals <- 100
+  
+  # Set model parameters
+  parameters <- c(
+    # Kinetic constants
+    k_trehalose = 0.01,          # Trehalose breakdown rate
+    k_glucose = 0.1,             # Glucose consumption rate
+    k_lactate = 0.03,            # Lactate consumption rate
+    
+    # Regulatory parameters
+    K_atp = 100,                 # ATP inhibition constant
+    K_glucose = 10,              # Glucose regulation of lactate consumption
+    
+    # Energy yields
+    yield_atp_glucose = 32,      # ATP per glucose
+    yield_atp_lactate = 30,      # ATP per lactate
+    
+    # Oxygen regulation
+    K_oxygen_lactate = 50,       # Oxygen-lactate regulation
+    K_oxygen_glucose = 50,       # Oxygen-glucose regulation
+    n_lactate = 2,               # Hill coefficient for lactate
+    n_glucose = 2,               # Hill coefficient for glucose
+    k_oxygen_consumption = k_oxygen_consumption  # Sampled oxygen consumption rate
+  )
+  
+  # =================================================================
+  # Phase 1: Initial Simulation
+  # =================================================================
+  
+  # Set initial state
+  initial_state <- c(
+    trehalose = trehalose_vals,
+    glucose = glucose_vals,
+    Lactate = Lactate_vals,
+    ATP = ATP_vals,
+    Oxygen = Oxygen_vals
+  )
+  
+  # Simulation time points
+  times <- seq(0, 100, by = 0.1)
+  
+  # Run simulation
+  out <- ode(y = initial_state, 
+             times = times, 
+             func = metabolic_model, 
+             parms = parameters)
+  
+  results3 <- as.data.frame(out)
+  
+  # =================================================================
+  # Phase 2: Continuation from Phase 1
+  # =================================================================
+  
+  # Update initial state
+  initial_state <- c(
+    trehalose = results3[nrow(results3), 2],
+    glucose = results3[nrow(results3), 3],
+    Lactate = results3[nrow(results3), 4],
+    ATP = ATP_vals,
+    Oxygen = results3[nrow(results3), 6]
+  )
+  
+  # Run simulation
+  out <- ode(y = initial_state, 
+             times = times, 
+             func = metabolic_model, 
+             parms = parameters)
+  
+  results1 <- as.data.frame(out)
+  
+  # =================================================================
+  # Phase 3: Final Simulation
+  # =================================================================
+  
+  # Set new initial state
+  initial_state <- c(
+    trehalose = trehalose_vals,
+    glucose = results1[nrow(results1), 3],
+    Lactate = results1[nrow(results1), 4],
+    ATP = ATP_vals,
+    Oxygen = Oxygen_vals
+  )
+  
+  # Run simulation
+  out <- ode(y = initial_state, 
+             times = times, 
+             func = metabolic_model, 
+             parms = parameters)
+  
+  # Process simulation results
+  results2 <- as.data.frame(out)
+  colnames(results2) <- colnames(results1)
+  
+  # Combine results and adjust time
+  results <- rbind(results1, results2)
+  results$time <- seq(0, 200.1, by = 0.1)
+  
+  # =================================================================
+  # Post-processing and Analysis
+  # =================================================================
+  
+  # Extract relevant time window
+  results_final <- results[c(which(results$time==90):nrow(results)),]
+  results_final[,c(2:3,5:9)] <- NULL
+  
+  # Adjust time window
+  results_final$time <- results_final$time-90
+  results_final <- filter(results_final, results_final$time<40)
+  
+  # Fit exponential decay to first 10 seconds
+  full_data <- filter(results_final, results_final$time<10)
+  colnames(full_data) <- c("X","Y")
+  
+  # Try exponential fit
+  b <- try(nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k), data = full_data), silent = TRUE)
+  
+  if (grepl("Error",b[1])==F) {
+    # If fit succeeds, apply exponential correction
+    nlsfit <- nls(Y ~ NLS.expoDecay(X, a, k), data = full_data)
+    nlsfit_vals <- as.data.frame(tidy(nlsfit))
+    full_data2 <- results_final
+    colnames(full_data2) <- c("X","Y")
+    
+    # Extract fit parameters
+    Y0 <- as.numeric(nlsfit_vals[1,2])
+    k <- as.numeric(nlsfit_vals[2,2])
+    
+    # Apply correction
+    full_data2 <- full_data2 %>% 
+      mutate(Y2=(Y0)*exp((-k)*full_data2$X)) %>%
+      mutate(Y3=(full_data2$Y/full_data2$Y2))
+  } else {
+    # If fit fails, use mean normalization
+    full_data2 <- results_final
+    colnames(full_data2) <- c("X","Y")
+    full_data2 <- full_data2 %>% 
+      mutate(Y2=mean(full_data2$Y)) %>%
+      mutate(Y3=(full_data2$Y/full_data2$Y2))
+  }
+  
+  # Normalize results and add noise
+  results_final_norm <- results_final
+  results_final_norm[,2] <- full_data2$Y3
+  colnames(results_final_norm) <- c("time","ratio")
+  results_final_norm$ratio <- add_noise(results_final_norm$ratio, noise_level)
+  
+  # Store traces
+  if (repeats==1) {
+    traces_norm <- results_final_norm
+    traces <- results_final
+  } else {
+    traces_norm <- cbind(traces_norm, results_final_norm[,-1])
+    traces <- cbind(traces, results_final[,-1])
+  }
+  
+  # Calculate area under curve
+  results_final_norm <- results_final_norm %>% mutate(base=1)
+  col1 <- results_final_norm
+  time1 <- as.numeric(min(col1$time))
+  time2 <- as.numeric(max(col1$time))
+  area1 <- auc(col1$time, col1$ratio, from=time1, to=time2)
+  area2 <- auc(col1$time, col1$base, from=time1, to=time2)
+  area <- (area1-area2)/nrow(col1)
+  
+  # Store results
+  output_table[repeats,] <- c(ATP_vals, k_oxygen_consumption, k, area)
+}
